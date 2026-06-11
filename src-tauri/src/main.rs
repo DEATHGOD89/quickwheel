@@ -116,7 +116,7 @@ fn main() {
     let settings = CustomMenuItem::new("settings".to_string(), "Settings");
     let tray_menu = SystemTrayMenu::new()
         .add_item(settings)
-        .add_native_item(tauri::SystemTrayMenuItem::Separator)
+        .add_native_item(SystemTrayMenuItem::Separator)
         .add_item(quit);
 
     let tray = SystemTray::new().with_menu(tray_menu);
@@ -125,16 +125,23 @@ fn main() {
         .setup(|app| {
             let window = app.get_window("main").unwrap();
             
+            // ✅ FIX: Load saved hotkey from config - NO HARDCODED OVERRIDE
+            let config_manager = APP_STATE.config.lock().unwrap();
+            let config = config_manager.load();
+            let saved_hotkey = config.hotkey.clone();
+            
+            println!("📋 Loaded saved hotkey: '{}'", saved_hotkey);
+            
             // Initialize Hotkey System
             let _ = hotkey::init_hotkey_system(window.clone(), app.handle());
             
-            let config_manager = APP_STATE.config.lock().unwrap();
-            let mut config = config_manager.load();
-            config.hotkey = "Alt+Q".to_string();
-            let _ = config_manager.save(&config);
-            
-            if let Err(e) = hotkey::GlobalHotkey::register("Alt+Q") {
-                let _ = logger::log_error(&format!("Failed to register initial hotkey: {}", e));
+            // ✅ Register the SAVED hotkey, not hardcoded
+            if let Err(e) = hotkey::GlobalHotkey::register(&saved_hotkey) {
+                let _ = logger::log_error(&format!("Failed to register hotkey: {}", e));
+                // Fallback to default if saved one fails
+                if let Err(e2) = hotkey::GlobalHotkey::register("Alt+Space") {
+                    let _ = logger::log_error(&format!("Failed to register fallback: {}", e2));
+                }
             }
             
             Ok(())
@@ -204,7 +211,7 @@ fn extract_icon_base64(path: &str) -> Option<String> {
     
     let output = Command::new("powershell")
         .args(&["-NoProfile", "-Command", &script])
-        .creation_flags(0x08000000) // CREATE_NO_WINDOW
+        .creation_flags(0x08000000)
         .output()
         .ok()?;
         
@@ -219,7 +226,6 @@ fn extract_icon_base64(path: &str) -> Option<String> {
     }
     None
 }
-
 
 #[tauri::command]
 fn add_app(mut app: AppItem) -> Result<(), String> {
@@ -249,10 +255,17 @@ fn get_config() -> Result<UserConfig, String> {
 
 #[tauri::command]
 fn update_config(config: UserConfig) -> Result<(), String> {
+    // Unregister old hotkey
     hotkey::GlobalHotkey::unregister_all();
+    
+    // Try to register new hotkey
     if let Err(e) = hotkey::GlobalHotkey::register(&config.hotkey) {
         let _ = logger::log_error(&format!("Failed to register new hotkey: {}", e));
+        // Don't save if registration fails
+        return Err(format!("Invalid hotkey: {}", e));
     }
+    
+    // Save only if registration succeeded
     APP_STATE.config.lock().unwrap().save(&config)
 }
 
