@@ -5,7 +5,13 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     VK_F9, VK_F10, VK_F11, VK_F12
 };
 use windows::Win32::Foundation::{HWND, LRESULT, WPARAM, LPARAM, POINT};
-use windows::Win32::UI::WindowsAndMessaging::{SetWindowLongPtrW, SetWindowLongW, GWLP_WNDPROC, GWL_WNDPROC, CallWindowProcW, WM_HOTKEY, WNDPROC, GetCursorPos, FindWindowW, ShowWindow, IsWindowVisible, SW_HIDE, SW_SHOW};
+use windows::Win32::Graphics::Gdi::{
+    GetMonitorInfoW, MonitorFromPoint, MONITORINFO, MONITOR_DEFAULTTONEAREST,
+};
+use windows::Win32::UI::WindowsAndMessaging::{
+    SetWindowLongPtrW, SetWindowLongW, GWLP_WNDPROC, GWL_WNDPROC, CallWindowProcW, WM_HOTKEY, WNDPROC,
+    GetCursorPos, FindWindowW, ShowWindow, IsWindowVisible, SW_HIDE, SW_SHOW, HWND_TOPMOST, SWP_SHOWWINDOW, SetWindowPos
+};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU32, AtomicIsize, Ordering};
 use once_cell::sync::Lazy;
@@ -58,6 +64,16 @@ impl GlobalHotkey {
             }
         }
     }
+
+    #[allow(dead_code)]
+    pub fn unregister(&self) {
+        let hwnd_isize = MAIN_HWND.load(Ordering::SeqCst);
+        let hwnd = if hwnd_isize == 0 { HWND(0) } else { HWND(hwnd_isize) };
+        unsafe {
+            let _ = UnregisterHotKey(hwnd, self.id as i32);
+            ACTIVE_HOTKEYS.lock().unwrap().remove(&self.id);
+        }
+    }
     
     pub fn unregister_all() {
         let hwnd_isize = MAIN_HWND.load(Ordering::SeqCst);
@@ -71,7 +87,7 @@ impl GlobalHotkey {
         active.clear();
     }
     
-    fn parse_hotkey_string(hotkey: &str) -> Result<(u32, u32), String> {
+    pub fn parse_hotkey_string(hotkey: &str) -> Result<(u32, u32), String> {
         let mut modifiers = 0u32;
         let mut key_code = 0u32;
         let parts: Vec<&str> = hotkey.split('+').collect();
@@ -171,16 +187,49 @@ unsafe extern "system" fn custom_wndproc(
                 HotkeyAction::RadialMenu => {
                     let guard = APP_HANDLE.lock().unwrap();
                     if let Some(app_handle) = guard.as_ref() {
-                        if let Some(window) = app_handle.get_window("main") {
-                            let _ = window.show();
-                            let _ = window.set_focus();
-                        }
-                        
                         let mut point = POINT::default();
                         unsafe {
                             let _ = GetCursorPos(&mut point);
                         }
-                        let _ = app_handle.emit_all("show-radial", vec![point.x, point.y]);
+                        
+                        crate::RADIAL_GENERATION.fetch_add(1, Ordering::SeqCst);
+                        
+                        unsafe {
+                            let hmonitor = MonitorFromPoint(point, MONITOR_DEFAULTTONEAREST);
+                            let mut mi = MONITORINFO {
+                                cbSize: std::mem::size_of::<MONITORINFO>() as u32,
+                                ..Default::default()
+                            };
+                            if GetMonitorInfoW(hmonitor, &mut mi).as_bool() {
+                                if let Some(window) = app_handle.get_window("main") {
+                                    if let Ok(hwnd_val) = window.hwnd() {
+                                        let hwnd = HWND(hwnd_val.0 as isize);
+                                        let mon_w = mi.rcMonitor.right - mi.rcMonitor.left;
+                                        let mon_h = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                                        let _ = SetWindowPos(
+                                            hwnd,
+                                            HWND_TOPMOST,
+                                            mi.rcMonitor.left,
+                                            mi.rcMonitor.top,
+                                            mon_w,
+                                            mon_h,
+                                            SWP_SHOWWINDOW,
+                                        );
+                                    }
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                                let rel_x = point.x - mi.rcMonitor.left;
+                                let rel_y = point.y - mi.rcMonitor.top;
+                                let _ = app_handle.emit_all("show-radial", vec![rel_x, rel_y]);
+                            } else {
+                                if let Some(window) = app_handle.get_window("main") {
+                                    let _ = window.show();
+                                    let _ = window.set_focus();
+                                }
+                                let _ = app_handle.emit_all("show-radial", vec![point.x, point.y]);
+                            }
+                        }
                     }
                 }
                 HotkeyAction::ToggleTaskbar => {

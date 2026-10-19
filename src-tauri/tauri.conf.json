@@ -13,11 +13,7 @@
     "allowlist": {
       "all": false,
       "window": {
-        "close": true,
-        "hide": true,
-        "show": true,
-        "setFocus": true,
-        "center": true
+        "all": true
       },
 
       "shell": {
@@ -67,18 +63,35 @@
         "url": "index.html"
       },
       {
-        "label": "settings",
-        "title": "QuickWheel Settings",
-        "width": 1000,
-        "height": 700,
-        "resizable": true,
-        "fullscreen": false,
+        "label": "searchbar",
+        "title": "QuickWheel Search Bar",
+        "width": 720,
+        "height": 140,
         "center": true,
-        "decorations": true,
-        "transparent": false,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
         "alwaysOnTop": false,
+        "skipTaskbar": true,
         "visible": false,
-        "url": "index.html?settings=true"
+        "url": "index.html?searchbar=true"
+      },
+      {
+        "label": "clock",
+        "title": "QuickWheel Desktop Clock",
+        "width": 440,
+        "height": 140,
+        "x": 100,
+        "y": 60,
+        "resizable": false,
+        "fullscreen": false,
+        "decorations": false,
+        "transparent": true,
+        "alwaysOnTop": false,
+        "skipTaskbar": true,
+        "visible": false,
+        "url": "index.html?clock=true"
       }
     ]
   }

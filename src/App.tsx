@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/tauri";
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/api/dialog";
+import { SearchOverlay, DesktopSearchBarWidget, BrowserInfo } from "./SearchOverlay";
 import "./App.css";
 
 interface AppItem {
@@ -22,23 +23,70 @@ interface RunningApp {
   icon?: string;
 }
 
-interface RadialSelection {
+export interface RadialSelection {
   ring: "outer" | "inner" | null;
   index: number;
+}
+
+export function computeSelection(
+  clientX: number,
+  clientY: number,
+  centerX: number,
+  centerY: number,
+  runningCount: number,
+  shortcutsCount: number
+): RadialSelection {
+  const dx = clientX - centerX;
+  const dy = clientY - centerY;
+  const dist = Math.sqrt(dx * dx + dy * dy);
+
+  // Center Deadzone: < 65px
+  if (dist < 65) {
+    return { ring: null, index: -1 };
+  }
+
+  let angle = Math.atan2(dy, dx);
+  if (angle < 0) angle += Math.PI * 2;
+
+  // Inner Ring: Distance between 65px and 175px (Live Running Taskbar Apps)
+  if (dist >= 65 && dist < 175) {
+    if (runningCount === 0) {
+      return { ring: null, index: -1 };
+    }
+    const angleStep = (Math.PI * 2) / runningCount;
+    const idx = Math.floor((angle + angleStep / 2) / angleStep) % runningCount;
+    return { ring: "inner", index: idx };
+  }
+
+  // Outer Ring: Distance >= 175px (Configured App Shortcuts)
+  if (dist >= 175) {
+    if (shortcutsCount === 0) {
+      return { ring: null, index: -1 };
+    }
+    const angleStep = (Math.PI * 2) / shortcutsCount;
+    const idx = Math.floor((angle + angleStep / 2) / angleStep) % shortcutsCount;
+    return { ring: "outer", index: idx };
+  }
+
+  return { ring: null, index: -1 };
 }
 
 function RadialMenu() {
   const [visible, setVisible] = useState(false);
   const [fadingOut, setFadingOut] = useState(false);
+  const [activeView, setActiveView] = useState<"radial" | "search">("radial");
   const [shortcuts, setShortcuts] = useState<AppItem[]>([]);
   const [runningApps, setRunningApps] = useState<RunningApp[]>([]);
   const [selection, setSelection] = useState<RadialSelection>({ ring: null, index: -1 });
   const [theme, setTheme] = useState("black");
+  const [centerPos, setCenterPos] = useState({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
   
   const visibleRef = useRef(false);
   const shortcutsRef = useRef<AppItem[]>([]);
   const runningAppsRef = useRef<RunningApp[]>([]);
   const selectionRef = useRef<RadialSelection>({ ring: null, index: -1 });
+  const activeViewRef = useRef<"radial" | "search">("radial");
+  const centerPosRef = useRef({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
 
   useEffect(() => {
     visibleRef.current = visible && !fadingOut;
@@ -55,6 +103,14 @@ function RadialMenu() {
   useEffect(() => {
     selectionRef.current = selection;
   }, [selection]);
+
+  useEffect(() => {
+    activeViewRef.current = activeView;
+  }, [activeView]);
+
+  useEffect(() => {
+    centerPosRef.current = centerPos;
+  }, [centerPos]);
 
   const loadThemeAndShortcuts = async () => {
     try {
@@ -83,15 +139,20 @@ function RadialMenu() {
 
     let unlistenShow: () => void;
     let unlistenHide: () => void;
+    let unlistenRefresh: () => void;
 
     const setupListeners = async () => {
-      const showPromise = listen("show-radial", () => {
-        // INSTANT APPEARANCE: Show UI immediately without waiting!
+      const showPromise = listen("show-radial", (event: { payload?: [number, number] }) => {
+        if (event && Array.isArray(event.payload) && event.payload.length >= 2) {
+          const [rawX, rawY] = event.payload;
+          const clampedX = Math.max(250, Math.min(window.innerWidth - 250, rawX));
+          const clampedY = Math.max(250, Math.min(window.innerHeight - 250, rawY));
+          setCenterPos({ x: clampedX, y: clampedY });
+        } else {
+          setCenterPos({ x: window.innerWidth / 2, y: window.innerHeight / 2 });
+        }
         setFadingOut(false);
         setVisible(true);
-
-        // Load shortcuts & running apps in background
-        loadThemeAndShortcuts();
         loadRunningAppsAsync();
       });
 
@@ -101,11 +162,17 @@ function RadialMenu() {
           setVisible(false);
           setFadingOut(false);
           setSelection({ ring: null, index: -1 });
+          setActiveView("radial");
         }, 200);
+      });
+
+      const refreshPromise = listen("refresh-shortcuts", () => {
+        loadThemeAndShortcuts();
       });
 
       unlistenShow = await showPromise;
       unlistenHide = await hidePromise;
+      unlistenRefresh = await refreshPromise;
     };
 
     setupListeners();
@@ -113,78 +180,66 @@ function RadialMenu() {
     return () => {
       if (unlistenShow) unlistenShow();
       if (unlistenHide) unlistenHide();
+      if (unlistenRefresh) unlistenRefresh();
     };
   }, []);
 
   const handleMouseMove = useCallback((e: MouseEvent) => {
-    if (!visibleRef.current) return;
+    if (!visibleRef.current || activeViewRef.current !== "radial") return;
 
-    const center = { x: window.innerWidth / 2, y: window.innerHeight / 2 };
-    const dx = e.clientX - center.x;
-    const dy = e.clientY - center.y;
-    const dist = Math.sqrt(dx * dx + dy * dy);
+    const center = centerPosRef.current;
+    const next = computeSelection(
+      e.clientX,
+      e.clientY,
+      center.x,
+      center.y,
+      runningAppsRef.current.length,
+      shortcutsRef.current.length
+    );
 
-    // Center Deadzone: < 65px
-    if (dist < 65) {
-      setSelection({ ring: null, index: -1 });
-      return;
-    }
-
-    let angle = Math.atan2(dy, dx);
-    if (angle < 0) angle += Math.PI * 2;
-
-    const currentShortcuts = shortcutsRef.current;
-    const currentRunning = runningAppsRef.current;
-
-    // Inner Ring: Distance between 65px and 175px (Live Running Taskbar Apps)
-    if (dist >= 65 && dist < 175) {
-      if (currentRunning.length === 0) {
-        setSelection({ ring: null, index: -1 });
-        return;
-      }
-      const angleStep = (Math.PI * 2) / currentRunning.length;
-      let idx = Math.floor((angle + angleStep / 2) / angleStep) % currentRunning.length;
-      setSelection({ ring: "inner", index: idx });
-      return;
-    }
-
-    // Outer Ring: Distance >= 175px (Configured App Shortcuts)
-    if (dist >= 175) {
-      if (currentShortcuts.length === 0) {
-        setSelection({ ring: null, index: -1 });
-        return;
-      }
-      const angleStep = (Math.PI * 2) / currentShortcuts.length;
-      let idx = Math.floor((angle + angleStep / 2) / angleStep) % currentShortcuts.length;
-      setSelection({ ring: "outer", index: idx });
-      return;
+    const prev = selectionRef.current;
+    if (prev.ring !== next.ring || prev.index !== next.index) {
+      setSelection(next);
     }
   }, []);
 
   const handleLaunch = useCallback(async (_e: MouseEvent) => {
-    if (!visibleRef.current) return;
+    if (!visibleRef.current || activeViewRef.current !== "radial") return;
 
     const { ring, index } = selectionRef.current;
 
     if (ring === "inner" && index >= 0 && runningAppsRef.current[index]) {
       const app = runningAppsRef.current[index];
-      await invoke("focus_running_app", { hwndStr: app.hwnd, hwnd_str: app.hwnd });
+      await invoke("focus_running_app", { hwnd_str: app.hwnd });
       await invoke("hide_radial");
     } else if (ring === "outer" && index >= 0 && shortcutsRef.current[index]) {
       const app = shortcutsRef.current[index];
       await invoke("launch_app", { path: app.path });
       await invoke("hide_radial");
     } else {
-      // Empty space / deadzone clicked
       await invoke("hide_radial");
     }
   }, []);
 
+  // Global Keypress Handling for Mode Switching (Tab / Space to Search)
   useEffect(() => {
     if (!visible) return;
+
+    const handleGlobalKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Tab") {
+        e.preventDefault();
+        setActiveView((prev) => (prev === "radial" ? "search" : "radial"));
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        invoke("hide_radial");
+      }
+    };
+
+    window.addEventListener("keydown", handleGlobalKeyDown);
     window.addEventListener("mousemove", handleMouseMove);
     window.addEventListener("mouseup", handleLaunch);
     return () => {
+      window.removeEventListener("keydown", handleGlobalKeyDown);
       window.removeEventListener("mousemove", handleMouseMove);
       window.removeEventListener("mouseup", handleLaunch);
     };
@@ -206,17 +261,31 @@ function RadialMenu() {
       className={`arc-reactor-overlay theme-${theme} ${fadingOut ? "fade-out" : "fade-in"}`}
       onClick={handleBackdropClick}
     >
-      {shortcuts.length === 0 && runningApps.length === 0 ? (
+      {activeView === "search" ? (
+        <SearchOverlay
+          theme={theme}
+          onSwitchToRadial={() => setActiveView("radial")}
+          onClose={() => invoke("hide_radial")}
+        />
+      ) : shortcuts.length === 0 && runningApps.length === 0 ? (
         <div className="no-apps-message" onClick={handleBackdropClick}>
           <div className="arc-core-empty"></div>
           <p>No shortcuts or running apps found!</p>
         </div>
       ) : (
-        <div className="arc-reactor-container">
+        <div 
+          className="arc-reactor-container"
+          style={{ left: `${centerPos.x}px`, top: `${centerPos.y}px` }}
+        >
           {/* Dual Ring Visual Boundaries */}
           <div className="arc-ring arc-outer"></div>
           <div className="arc-ring arc-inner"></div>
-          <div className="arc-core-center" onClick={handleBackdropClick}></div>
+
+          {/* Center Core */}
+          <div 
+            className="arc-core-center" 
+            onClick={handleBackdropClick}
+          ></div>
 
           {/* Outer Ring: Configured App Shortcuts */}
           {shortcuts.map((app, i) => {
@@ -373,11 +442,14 @@ function HotkeyInput({ value, onChange, placeholder = "" }: { value: string; onC
 function Settings() {
   const [config, setConfig] = useState<any>(null);
   const [apps, setApps] = useState<AppItem[]>([]);
+  const [browsers, setBrowsers] = useState<BrowserInfo[]>([]);
   const [activeTab, setActiveTab] = useState("general");
+  const [hotkeyError, setHotkeyError] = useState<string | null>(null);
 
   useEffect(() => {
     loadConfig();
     loadApps();
+    loadBrowsers();
   }, []);
 
   const loadConfig = async () => {
@@ -388,6 +460,15 @@ function Settings() {
   const loadApps = async () => {
     const appList = await invoke<AppItem[]>("get_apps");
     setApps(appList);
+  };
+
+  const loadBrowsers = async () => {
+    try {
+      const bList = await invoke<BrowserInfo[]>("get_browsers");
+      setBrowsers(bList);
+    } catch (e) {
+      console.error(e);
+    }
   };
 
   const handleDrop = async (e: React.DragEvent) => {
@@ -497,6 +578,26 @@ function Settings() {
             </div>
 
             <div className="setting">
+              <label>Default Web Search Browser</label>
+              <select
+                className="hotkey-input"
+                style={{ cursor: 'pointer' }}
+                value={config.default_browser || "default"}
+                onChange={async (e) => {
+                  const newConfig = { ...config, default_browser: e.target.value };
+                  await invoke("update_config", { config: newConfig });
+                  await loadConfig();
+                }}
+              >
+                {browsers.map((b) => (
+                  <option key={b.exe_path} value={b.exe_path}>
+                    {b.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="setting">
               <label>Radial Menu Hotkey</label>
               <HotkeyInput
                 value={config.hotkey}
@@ -504,10 +605,12 @@ function Settings() {
                   if (!val) return;
                   const newConfig = { ...config, hotkey: val };
                   try {
+                    setHotkeyError(null);
                     await invoke("update_config", { config: newConfig });
                     await loadConfig();
-                  } catch (e) {
+                  } catch (e: any) {
                     console.error("Failed to update hotkey:", e);
+                    setHotkeyError(typeof e === "string" ? e : "Failed to register hotkey. Key may already be in use.");
                   }
                 }}
               />
@@ -521,14 +624,31 @@ function Settings() {
                 onChange={async (val) => {
                   const newConfig = { ...config, taskbar_hotkey: val };
                   try {
+                    setHotkeyError(null);
                     await invoke("update_config", { config: newConfig });
                     await loadConfig();
-                  } catch (e) {
+                  } catch (e: any) {
                     console.error("Failed to update hotkey:", e);
+                    setHotkeyError(typeof e === "string" ? e : "Failed to register taskbar hotkey.");
                   }
                 }}
               />
             </div>
+
+            {hotkeyError && (
+              <div style={{
+                padding: "8px 12px",
+                borderRadius: "8px",
+                background: "rgba(239, 68, 68, 0.2)",
+                border: "1px solid rgba(239, 68, 68, 0.6)",
+                color: "#ef4444",
+                fontSize: "13px",
+                fontWeight: 500,
+                marginTop: "4px"
+              }}>
+                ⚠️ {hotkeyError}
+              </div>
+            )}
 
             <div className="setting">
               <label className="checkbox-label">
@@ -543,6 +663,36 @@ function Settings() {
                 />
                 Start with Windows
               </label>
+            </div>
+
+            <div className="setting">
+              <label>Desktop Widgets & RAM Control</label>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginTop: '8px' }}>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={config.enable_searchbar !== false}
+                    onChange={async (e) => {
+                      const newConfig = { ...config, enable_searchbar: e.target.checked };
+                      await invoke("update_config", { config: newConfig });
+                      await loadConfig();
+                    }}
+                  />
+                  🔍 Enable Desktop Search Bar Widget (Save ~50MB RAM if disabled)
+                </label>
+                <label className="checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={config.enable_clock !== false}
+                    onChange={async (e) => {
+                      const newConfig = { ...config, enable_clock: e.target.checked };
+                      await invoke("update_config", { config: newConfig });
+                      await loadConfig();
+                    }}
+                  />
+                  ⏰ Enable Desktop Clock & Date Widget (Save ~50MB RAM if disabled)
+                </label>
+              </div>
             </div>
           </div>
         )}
@@ -565,7 +715,7 @@ function Settings() {
                   <button
                     onClick={async () => {
                       try {
-                        await invoke("remove_app", { appId: app.id, app_id: app.id });
+                        await invoke("remove_app", { app_id: app.id });
                         await loadApps();
                       } catch (e) {
                         console.error("Failed to remove app:", e);
@@ -584,8 +734,20 @@ function Settings() {
   );
 }
 
+import { DesktopClockWidget } from "./DesktopClockWidget";
+
 function App() {
   const isSettings = window.location.search.includes("settings=true");
+  const isSearchBar = window.location.search.includes("searchbar=true");
+  const isClock = window.location.search.includes("clock=true");
+
+  if (isSearchBar) {
+    return <DesktopSearchBarWidget />;
+  }
+
+  if (isClock) {
+    return <DesktopClockWidget />;
+  }
 
   return <div className="app">{isSettings ? <Settings /> : <RadialMenu />}</div>;
 }

@@ -19,6 +19,14 @@ pub fn setup_panic_hook() {
 
 pub fn log_error(message: &str) -> std::io::Result<()> {
     let log_path = std::env::temp_dir().join("quickwheel_error.log");
+    
+    // Rotate/truncate if log file exceeds 1MB (1,048,576 bytes)
+    if let Ok(metadata) = std::fs::metadata(&log_path) {
+        if metadata.len() > 1_048_576 {
+            let _ = std::fs::remove_file(&log_path);
+        }
+    }
+    
     let mut file = OpenOptions::new()
         .create(true)
         .append(true)
